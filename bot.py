@@ -278,61 +278,61 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Выберите объём молока для записи 🥛:", reply_markup=amount_keyboard())
 
     elif data == "time_custom":
-    context.user_data['awaiting_time'] = {
-        "owner_id": owner_id,
-        "adder_chat_id": query.from_user.id
-    }
-    await query.edit_message_text(
-        "Введите время кормления в формате:\n"
-        "• YYYY-MM-DD HH:MM\n"
-        "• или HH:MM (сегодня/завтра)\n\n"
-        "Например: 2025-12-30 14:30 или 14:30",
-    )
-    return
+        context.user_data['awaiting_time'] = {
+            "owner_id": owner_id,
+            "adder_chat_id": query.from_user.id
+        }
+        await query.edit_message_text(
+            "Введите время кормления в формате:\n"
+            "• YYYY-MM-DD HH:MM\n"
+            "• или HH:MM (сегодня/завтра)\n\n"
+            "Например: 2025-12-30 14:30 или 14:30",
+        )
+        return
     
     elif data.startswith("ml_"):
-    if data == "ml_custom":
-        context.user_data['awaiting_ml'] = owner_id
-        await query.edit_message_text("Введите количество мл (целое число), например 135. Отправьте сообщение или /cancel.")
+        if data == "ml_custom":
+            context.user_data['awaiting_ml'] = owner_id
+            await query.edit_message_text("Введите количество мл (целое число), например 135. Отправьте сообщение или /cancel.")
+            return
+    
+        ml = int(data.split("_")[1])
+    
+        # сохраняем pending, но НЕ добавляем кормление сразу
+        context.user_data['pending'] = {
+            "owner_id": owner_id,
+            "ts_utc": datetime.now(timezone.utc),
+            "ml": ml,
+            "adder_chat_id": query.from_user.id,
+            "owner_chat_id": get_owner_chat_id(owner_id) or query.from_user.id
+        }
+    
+        await query.edit_message_text(
+            f"Выбрано {ml} мл. Хотите установить напоминание?",
+            reply_markup=reminder_keyboard()
+        )
         return
-
-    ml = int(data.split("_")[1])
-
-    # сохраняем pending, но НЕ добавляем кормление сразу
-    context.user_data['pending'] = {
-        "owner_id": owner_id,
-        "ts_utc": datetime.now(timezone.utc),
-        "ml": ml,
-        "adder_chat_id": query.from_user.id,
-        "owner_chat_id": get_owner_chat_id(owner_id) or query.from_user.id
-    }
-
-    await query.edit_message_text(
-        f"Выбрано {ml} мл. Хотите установить напоминание?",
-        reply_markup=reminder_keyboard()
-    )
-    return
 
     elif data.startswith("rem_"):
-    pending = context.user_data.pop('pending', None)
-    if not pending:
-        await query.edit_message_text("Нет данных для создания напоминания. Начните заново.", reply_markup=main_keyboard())
-        return
-
-    if data == "rem_none":
-        minutes = None
-    else:
-        minutes = int(data.split("_")[1])
-
-    local_str = add_feeding_and_schedule(
-        owner_id=pending["owner_id"],
-        ts_local_or_utc=pending["ts_utc"],
-        ml=pending["ml"],
-        owner_chat_id=pending["owner_chat_id"],
-        adder_chat_id=pending["adder_chat_id"],
-        reminder_minutes=minutes,
-        context=context
-    )
+        pending = context.user_data.pop('pending', None)
+        if not pending:
+            await query.edit_message_text("Нет данных для создания напоминания. Начните заново.", reply_markup=main_keyboard())
+            return
+    
+        if data == "rem_none":
+            minutes = None
+        else:
+            minutes = int(data.split("_")[1])
+    
+        local_str = add_feeding_and_schedule(
+            owner_id=pending["owner_id"],
+            ts_local_or_utc=pending["ts_utc"],
+            ml=pending["ml"],
+            owner_chat_id=pending["owner_chat_id"],
+            adder_chat_id=pending["adder_chat_id"],
+            reminder_minutes=minutes,
+            context=context
+        )
 
     await query.edit_message_text(
         f"✅ Кормление добавлено: {local_str} — **{pending['ml']} мл** 🍼",
