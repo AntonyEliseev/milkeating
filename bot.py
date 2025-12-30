@@ -125,6 +125,103 @@ def get_owner_by_invited(invited_id: int):
     conn.close()
     return row[0] if row else None
 
+def add_reminder_db(owner_id: int, owner_chat_id: int, adder_chat_id: int, remind_at: datetime, interval_minutes: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO reminders (owner_id, owner_chat_id, adder_chat_id, remind_at, interval_minutes, created_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)",
+        (owner_id, owner_chat_id, adder_chat_id, remind_at.isoformat(), interval_minutes, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+def mark_reminder_done(reminder_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE reminders SET active = 0 WHERE id = ?", (reminder_id,))
+    conn.commit()
+    conn.close()
+
+def get_active_reminders():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cur.execute("SELECT id, owner_id, owner_chat_id, adder_chat_id, remind_at, interval_minutes FROM reminders WHERE active = 1 AND remind_at >= ? ORDER BY remind_at ASC", (now_iso,))
+    rows = cur.fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        rid, owner_id, owner_chat_id, adder_chat_id, remind_at_iso, interval = r
+        remind_at_dt = datetime.fromisoformat(remind_at_iso).astimezone(timezone.utc)
+        result.append((rid, owner_id, owner_chat_id, adder_chat_id, remind_at_dt, interval))
+    return result
+
+# ========== Helpers ==========
+def add_feeding_and_schedule(owner_id: int, ts_local_or_utc: datetime, ml: Optional[int],
+                             owner_chat_id: Optional[int], adder_chat_id: Optional[int],
+                             reminder_minutes: Optional[int], context: ContextTypes.DEFAULT_TYPE):
+    tz = ZoneInfo(TIMEZONE)
+    if ts_local_or_utc.tzinfo is None:
+        ts_utc = ts_local_or_utc.replace(tzinfo=tz).astimezone(timezone.utc)
+    else:
+        ts_utc = ts_local_or_utc.astimezone(timezone.utc)
+    ts_utc = strip_seconds(ts_utc)
+
+    add_feeding_db(owner_id, ts_utc, ml)
+
+    if reminder_minutes:
+        remind_at = ts_utc + timedelta(minutes=reminder_minutes)
+        rid = add_reminder_db(owner_id, owner_chat_id, adder_chat_id, remind_at, reminder_minutes)
+        schedule_reminder_job(context, rid, owner_id, owner_chat_id, adder_chat_id, remind_at, reminder_minutes)
+
+    local = ts_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+    return local
+
+def strip_seconds(dt: datetime) -> datetime:
+    return dt.replace(second=0, microsecond=0)
+
+def parse_user_datetime(text: str, tz: ZoneInfo):
+    """
+    Принимает 'YYYY-MM-DD HH:MM' или 'HH:MM' (локальное время в TIMEZONE).
+    Возвращает datetime в UTC или None.
+    """
+    text = text.strip()
+    try:
+        dt = datetime.strptime(text, "%Y-%m-%d %H:%M")
+        local = dt.replace(tzinfo=tz)
+        return local.astimezone(timezone.utc)
+    except Exception:
+        pass
+    try:
+        t = datetime.strptime(text, "%H:%M").time()
+        now_local = datetime.now(tz)
+        local_dt = datetime(now_local.year, now_local.month, now_local.day, t.hour, t.minute, tzinfo=tz)
+        if local_dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+            local_dt = local_dt + timedelta(days=1)
+        return local_dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def schedule_reminder_job(context: ContextTypes.DEFAULT_TYPE, reminder_id: int, owner_id: int,
+                          owner_chat_id: int, adder_chat_id: int, remind_at: datetime, interval_minutes: int):
+    delay = (remind_at - datetime.now(timezone.utc)).total_seconds()
+    if delay <= 0:
+        mark_reminder_done(reminder_id)
+        return
+    context.application.job_queue.run_once(
+        reminder_callback,
+        when=delay,
+        data={
+            "reminder_id": reminder_id,
+            "owner_id": owner_id,
+            "owner_chat_id": owner_chat_id,
+            "adder_chat_id": adder_chat_id,
+            "interval": interval_minutes
+        }
+    )
+
 # ========== UI helpers ==========
 def main_keyboard():
     keyboard = [
@@ -144,7 +241,19 @@ def amount_keyboard():
          InlineKeyboardButton("180 мл", callback_data="ml_180")],
         [InlineKeyboardButton("210 мл", callback_data="ml_210"),
          InlineKeyboardButton("✏️ Другое", callback_data="ml_custom")],
-        [InlineKeyboardButton("↩️ Отмена", callback_data="cancel")]
+        [InlineKeyboardButton("⏰ Указать время", callback_data="time_custom"),
+         InlineKeyboardButton("↩️ Отмена", callback_data="cancel")]
+    ]
+    return InlineKeyboardMarkup(keys)
+
+def reminder_keyboard():
+    keys = [
+        [InlineKeyboardButton("⏱ 2:00", callback_data="rem_120"),
+         InlineKeyboardButton("⏱ 2:30", callback_data="rem_150")],
+        [InlineKeyboardButton("⏱ 3:00", callback_data="rem_180"),
+         InlineKeyboardButton("⏱ 3:30", callback_data="rem_210")],
+        [InlineKeyboardButton("⏱ 4:00", callback_data="rem_240"),
+         InlineKeyboardButton("↩️ Пропустить", callback_data="rem_none")]
     ]
     return InlineKeyboardMarkup(keys)
 
@@ -168,18 +277,69 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "add":
         await query.edit_message_text("Выберите объём молока для записи 🥛:", reply_markup=amount_keyboard())
 
+    elif data == "time_custom":
+    context.user_data['awaiting_time'] = {
+        "owner_id": owner_id,
+        "adder_chat_id": query.from_user.id
+    }
+    await query.edit_message_text(
+        "Введите время кормления в формате:\n"
+        "• YYYY-MM-DD HH:MM\n"
+        "• или HH:MM (сегодня/завтра)\n\n"
+        "Например: 2025-12-30 14:30 или 14:30",
+    )
+    return
+    
     elif data.startswith("ml_"):
-        if data == "ml_custom":
-            # ask for custom ml
-            context.user_data['awaiting_ml'] = owner_id
-            await query.edit_message_text("Введите количество мл (целое число), например 135. Отправьте сообщение или /cancel.")
-            return
-        # preset
-        ml = int(data.split("_")[1])
-        now_utc = datetime.now(timezone.utc)
-        add_feeding_db(owner_id, now_utc, ml)
-        local = now_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
-        await query.edit_message_text(f"✅ Кормление добавлено: {local} — **{ml} мл** 🍼", reply_markup=main_keyboard())
+    if data == "ml_custom":
+        context.user_data['awaiting_ml'] = owner_id
+        await query.edit_message_text("Введите количество мл (целое число), например 135. Отправьте сообщение или /cancel.")
+        return
+
+    ml = int(data.split("_")[1])
+
+    # сохраняем pending, но НЕ добавляем кормление сразу
+    context.user_data['pending'] = {
+        "owner_id": owner_id,
+        "ts_utc": datetime.now(timezone.utc),
+        "ml": ml,
+        "adder_chat_id": query.from_user.id,
+        "owner_chat_id": get_owner_chat_id(owner_id) or query.from_user.id
+    }
+
+    await query.edit_message_text(
+        f"Выбрано {ml} мл. Хотите установить напоминание?",
+        reply_markup=reminder_keyboard()
+    )
+    return
+
+    elif data.startswith("rem_"):
+    pending = context.user_data.pop('pending', None)
+    if not pending:
+        await query.edit_message_text("Нет данных для создания напоминания. Начните заново.", reply_markup=main_keyboard())
+        return
+
+    if data == "rem_none":
+        minutes = None
+    else:
+        minutes = int(data.split("_")[1])
+
+    local_str = add_feeding_and_schedule(
+        owner_id=pending["owner_id"],
+        ts_local_or_utc=pending["ts_utc"],
+        ml=pending["ml"],
+        owner_chat_id=pending["owner_chat_id"],
+        adder_chat_id=pending["adder_chat_id"],
+        reminder_minutes=minutes,
+        context=context
+    )
+
+    await query.edit_message_text(
+        f"✅ Кормление добавлено: {local_str} — **{pending['ml']} мл** 🍼",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
+    return
 
     elif data == "cancel":
         await query.edit_message_text("Отменено ↩️", reply_markup=main_keyboard())
@@ -219,12 +379,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # handle custom ml input or /join etc.
     user = update.effective_user
     text = update.message.text.strip()
+    tz = ZoneInfo(TIMEZONE)
 
-    # custom ml flow
+    # === 1) Пользователь вводит мл после "Другое" (ml_custom) ===
     if context.user_data.get('awaiting_ml'):
+        owner_id = context.user_data.pop('awaiting_ml')
+
         try:
             ml = int(text)
             if ml <= 0:
@@ -232,16 +394,73 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("Неверное значение. Введите положительное целое число мл или /cancel.")
             return
-        owner_id = context.user_data.pop('awaiting_ml')
-        now_utc = datetime.now(timezone.utc)
-        add_feeding_db(owner_id, now_utc, ml)
-        tz = ZoneInfo(TIMEZONE)
-        local = now_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
-        await update.message.reply_text(f"✅ Кормление добавлено: {local} — **{ml} мл** 🍼", parse_mode="Markdown", reply_markup=main_keyboard())
+
+        # сохраняем pending, но НЕ добавляем кормление сразу
+        context.user_data['pending'] = {
+            "owner_id": owner_id,
+            "ts_utc": datetime.now(timezone.utc),
+            "ml": ml,
+            "adder_chat_id": update.effective_chat.id,
+            "owner_chat_id": get_owner_chat_id(owner_id) or update.effective_chat.id
+        }
+
+        await update.message.reply_text(
+            f"Вы ввели {ml} мл. Хотите установить напоминание?",
+            reply_markup=reminder_keyboard()
+        )
         return
 
-    # other text: ignore or help
-    await update.message.reply_text("Используйте меню или /start чтобы открыть его.", reply_markup=main_keyboard())
+    # === 2) Пользователь вводит время после "Указать время" ===
+    if context.user_data.get('awaiting_time'):
+        info = context.user_data.pop('awaiting_time')
+
+        dt_utc = parse_user_datetime(text, tz)
+        if not dt_utc:
+            await update.message.reply_text(
+                "Неверный формат времени.\n"
+                "Используйте YYYY-MM-DD HH:MM или HH:MM.\n"
+                "Попробуйте ещё раз или /cancel."
+            )
+            return
+
+        # теперь нужно спросить мл
+        context.user_data['awaiting_ml_for_time'] = {
+            "owner_id": info["owner_id"],
+            "adder_chat_id": info["adder_chat_id"],
+            "owner_chat_id": get_owner_chat_id(info["owner_id"]) or update.effective_chat.id,
+            "ts_utc": dt_utc
+        }
+
+        await update.message.reply_text("Введите количество мл (целое число):")
+        return
+
+    # === 3) Пользователь вводит мл после указания времени ===
+    if context.user_data.get('awaiting_ml_for_time'):
+        pending = context.user_data.pop('awaiting_ml_for_time')
+
+        try:
+            ml = int(text)
+            if ml <= 0:
+                raise ValueError()
+        except ValueError:
+            await update.message.reply_text("Введите положительное целое число мл или /cancel.")
+            return
+
+        pending["ml"] = ml
+        context.user_data['pending'] = pending
+
+        local_time = pending["ts_utc"].astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+        await update.message.reply_text(
+            f"Кормление запланировано на {local_time}.\nХотите установить напоминание?",
+            reply_markup=reminder_keyboard()
+        )
+        return
+
+    # === 4) Любой другой текст — подсказка ===
+    await update.message.reply_text(
+        "Используйте меню или /start чтобы открыть его.",
+        reply_markup=main_keyboard()
+    )
 
 # Commands for sharing/joining
 async def share_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -283,6 +502,33 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/join <код> — присоединиться к владельцу по коду\n"
         "/cancel — отменить ввод"
     )
+
+async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    data = job.data or {}
+    reminder_id = data.get("reminder_id")
+    owner_chat_id = data.get("owner_chat_id")
+    adder_chat_id = data.get("adder_chat_id")
+    interval = data.get("interval")
+
+    hours = interval // 60
+    minutes = interval % 60
+    minutes_text = f" {minutes} мин" if minutes else ""
+    text = f"⏰ Напоминание: прошло {hours} ч{minutes_text} с последнего кормления. Пора покормить ребёнка! 🍼"
+
+    if owner_chat_id:
+        try:
+            await context.bot.send_message(chat_id=owner_chat_id, text=text)
+        except Exception:
+            pass
+    if adder_chat_id and adder_chat_id != owner_chat_id:
+        try:
+            await context.bot.send_message(chat_id=adder_chat_id, text=text)
+        except Exception:
+            pass
+
+    if reminder_id:
+        mark_reminder_done(reminder_id)
 
 # ========== Запуск ==========
 def run():
