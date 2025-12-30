@@ -334,12 +334,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context=context
         )
 
-    await query.edit_message_text(
-        f"✅ Кормление добавлено: {local_str} — **{pending['ml']} мл** 🍼",
-        parse_mode="Markdown",
-        reply_markup=main_keyboard()
-    )
-    return
+        await query.edit_message_text(
+            f"✅ Кормление добавлено: {local_str} — **{pending['ml']} мл** 🍼",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+        return
 
     elif data == "cancel":
         await query.edit_message_text("Отменено ↩️", reply_markup=main_keyboard())
