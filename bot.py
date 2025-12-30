@@ -340,43 +340,43 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_keyboard()
         )
         return
-
-    elif data == "cancel":
-        await query.edit_message_text("Отменено ↩️", reply_markup=main_keyboard())
-
-    elif data == "stats":
-        rows = get_feedings_last_24h_for_owner(owner_id)
-        if not rows:
-            await query.edit_message_text("За последние 24 часа кормлений не было. 😴", reply_markup=main_keyboard())
-            return
-        lines = []
-        for ts, ml in rows:
-            local = ts.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
-            ml_text = f" — {ml} мл" if ml else ""
-            lines.append(f"{local}{ml_text}")
-        msg = "📋 Кормления за последние 24 часа:\n\n" + "\n".join(lines) + f"\n\nОбщее количество: {len(lines)} 🧾"
-        await query.edit_message_text(msg, reply_markup=main_keyboard())
-
-    elif data == "del_last":
-        ok = delete_last_feeding(owner_id)
-        if ok:
-            await query.edit_message_text("🗑️ Последнее кормление удалено.", reply_markup=main_keyboard())
-        else:
-            await query.edit_message_text("Нечего удалять — записей нет.", reply_markup=main_keyboard())
-
-    elif data == "del_all":
-        deleted = delete_all_feedings(owner_id)
-        await query.edit_message_text(f"🧹 Удалено записей: {deleted}", reply_markup=main_keyboard())
-
-    elif data == "share":
-        # create invite code for this user (owner)
-        code = create_invite_code(user_id)
-        await query.edit_message_text(
-            f"🔗 Код приглашения создан: <b>{code}</b>\nОтправьте этот код тому, кого хотите пригласить.\n"
-            "Приглашённый должен отправить команду /join <код> в этом боте.",
-            parse_mode="HTML",
-            reply_markup=main_keyboard()
-        )
+    
+        elif data == "cancel":
+            await query.edit_message_text("Отменено ↩️", reply_markup=main_keyboard())
+    
+        elif data == "stats":
+            rows = get_feedings_last_24h_for_owner(owner_id)
+            if not rows:
+                await query.edit_message_text("За последние 24 часа кормлений не было. 😴", reply_markup=main_keyboard())
+                return
+            lines = []
+            for ts, ml in rows:
+                local = ts.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+                ml_text = f" — {ml} мл" if ml else ""
+                lines.append(f"{local}{ml_text}")
+            msg = "📋 Кормления за последние 24 часа:\n\n" + "\n".join(lines) + f"\n\nОбщее количество: {len(lines)} 🧾"
+            await query.edit_message_text(msg, reply_markup=main_keyboard())
+    
+        elif data == "del_last":
+            ok = delete_last_feeding(owner_id)
+            if ok:
+                await query.edit_message_text("🗑️ Последнее кормление удалено.", reply_markup=main_keyboard())
+            else:
+                await query.edit_message_text("Нечего удалять — записей нет.", reply_markup=main_keyboard())
+    
+        elif data == "del_all":
+            deleted = delete_all_feedings(owner_id)
+            await query.edit_message_text(f"🧹 Удалено записей: {deleted}", reply_markup=main_keyboard())
+    
+        elif data == "share":
+            # create invite code for this user (owner)
+            code = create_invite_code(user_id)
+            await query.edit_message_text(
+                f"🔗 Код приглашения создан: <b>{code}</b>\nОтправьте этот код тому, кого хотите пригласить.\n"
+                "Приглашённый должен отправить команду /join <код> в этом боте.",
+                parse_mode="HTML",
+                reply_markup=main_keyboard()
+            )
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
